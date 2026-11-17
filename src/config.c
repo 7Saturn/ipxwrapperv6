@@ -41,7 +41,9 @@ main_config_t get_main_config(bool ignore_ini)
 	
 	config.dosbox_server_addr = NULL;
 	config.dosbox_server_port = 213;
+	config.dosbox_server_port6 = 0;
 	config.dosbox_coalesce = false;
+	config.dosbox_ip_version = DOSBOX_IP_VERSION_AUTO;
 	
 	config.rate_limit_packets = 0;
 	config.rate_limit_bytes = 0;
@@ -103,7 +105,9 @@ main_config_t get_main_config(bool ignore_ini)
 	
 	config.dosbox_server_addr = reg_get_string(reg, "dosbox_server_addr", "");
 	config.dosbox_server_port = reg_get_dword(reg, "dosbox_server_port", config.dosbox_server_port);
+	config.dosbox_server_port6 = reg_get_dword(reg, "dosbox_server_port6", config.dosbox_server_port6);
 	config.dosbox_coalesce    = reg_get_dword(reg, "dosbox_coalesce", config.dosbox_coalesce);
+	config.dosbox_ip_version  = reg_get_dword(reg, "dosbox_ip_version", config.dosbox_ip_version);
 	
 	config.rate_limit_packets = reg_get_dword(reg, "rate_limit_packets", config.rate_limit_packets);
 	config.rate_limit_bytes = reg_get_dword(reg, "rate_limit_bytes", config.rate_limit_bytes);
@@ -121,6 +125,17 @@ main_config_t get_main_config(bool ignore_ini)
 			(unsigned int)(config.frame_type));
 		
 		config.frame_type = FRAME_TYPE_ETH_II;
+	}
+	
+	/* Check for valid dosbox_ip_version */
+	
+	if (   config.dosbox_ip_version != DOSBOX_IP_VERSION_AUTO
+		&& config.dosbox_ip_version != DOSBOX_IP_VERSION_4
+		&& config.dosbox_ip_version != DOSBOX_IP_VERSION_6) {
+		log_printf(LOG_WARNING, "Ignoring unknown dosbox_ip_version %u",
+			(unsigned int)(config.dosbox_ip_version));
+		
+		config.dosbox_ip_version = DOSBOX_IP_VERSION_AUTO;
 	}
 	
 	reg_close(reg);
@@ -160,6 +175,30 @@ static int process_ini_directive(void *context, const char *section, const char 
 		}
 		else{
 			log_printf(LOG_ERROR, "Invalid \"dosbox server port\" (%s) specified in ipxwrapper.ini", value);
+		}
+	}
+	else if (strcmp(name, "dosbox server ipv6 port") == 0) {
+		int port = atoi(value);
+		
+		if (port >= 1 && port <= 65535) {
+			config->dosbox_server_port6 = port;
+		}
+		else {
+			log_printf(LOG_ERROR, "Invalid \"dosbox server ipv6 port\" (%s) specified in ipxwrapper.ini", value);
+		}
+	}
+	else if (strcmp(name, "dosbox ip version") == 0) {
+		if (strcmp(value, "auto") == 0 || strcmp(value, "both") == 0) {
+			config->dosbox_ip_version = DOSBOX_IP_VERSION_AUTO;
+		}
+		else if (strcmp(value, "4") == 0 || strcmp(value, "ipv4") == 0) {
+			config->dosbox_ip_version = DOSBOX_IP_VERSION_4;
+		}
+		else if (strcmp(value, "6") == 0 || strcmp(value, "ipv6") == 0) {
+			config->dosbox_ip_version = DOSBOX_IP_VERSION_6;
+		}
+		else {
+			log_printf(LOG_ERROR, "Invalid \"dosbox ip version\" (%s) specified in ipxwrapper.ini (expected \"auto\", \"4\" or \"6\")", value);
 		}
 	}
 	else if(strcmp(name, "coalesce packets") == 0)
@@ -257,7 +296,9 @@ bool set_main_config(const main_config_t *config)
 		
 		&& reg_set_string(reg, "dosbox_server_addr", config->dosbox_server_addr)
 		&& reg_set_dword(reg,  "dosbox_server_port", config->dosbox_server_port)
+		&& reg_set_dword(reg,  "dosbox_server_port6", config->dosbox_server_port6)
 		&& reg_set_dword(reg,  "dosbox_coalesce",    config->dosbox_coalesce)
+		&& reg_set_dword(reg,  "dosbox_ip_version",  config->dosbox_ip_version)
 		
 		&& reg_set_dword(reg, "rate_limit_packets", config->rate_limit_packets)
 		&& reg_set_dword(reg, "rate_limit_bytes", config->rate_limit_bytes);

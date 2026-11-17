@@ -1,3 +1,4 @@
+BUILDING.md
 changes.txt
 ipxwrapper.ini.example
 license.txt
@@ -38,6 +39,8 @@ src/interface.c
 src/interface.h
 src/interface2.c
 src/interface2.h
+src/ipver.c
+src/ipver.h
 src/ipxwrapper.c
 src/ipxwrapper.def
 src/ipxwrapper.h
@@ -77,6 +80,7 @@ include/utlist.h
 include/wsnwlink.h
 
 tests/05-addr.t
+tests/05-ipver.t
 tests/05-ratelimit.t
 tests/07-addrcache.t
 tests/07-ethernet.t
@@ -99,6 +103,7 @@ tests/addrcache.c
 tests/ratelimit.c
 tests/config.pm
 tests/ethernet.c
+tests/ipver.c
 tests/fionread.c
 tests/ptype.pm
 tests/spx.c

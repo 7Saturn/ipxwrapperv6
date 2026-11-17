@@ -9,6 +9,22 @@
 ; dosbox server address = dosbox.example.com
 ; dosbox server port = 213
 
+; Uncomment the line below if the DOSBox IPX server uses a different port for
+; clients connecting by IPv6 than for those connecting by IPv4. If it is not
+; given, the port above is used for both.
+;
+; dosbox server ipv6 port = 2130
+
+; Uncomment ONE of the lines below to force the IP version used to reach the
+; DOSBox IPX server.
+;
+; By default ("auto") IPXWrapper uses whichever of IPv4 and IPv6 the server
+; can be reached by. The server address may also be given as a literal IPv4 or
+; IPv6 address (e.g. 192.0.2.1 or 2001:db8::1).
+;
+; dosbox ip version = 4
+; dosbox ip version = 6
+
 ; Uncomment the line below to enable "packet coalescing"
 ;
 ; When packet coalescing is enabled and the application sends large numbers of

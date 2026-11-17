@@ -33,6 +33,17 @@ enum main_config_encap_type
 	ENCAP_TYPE_DOSBOX = 2,
 };
 
+/* Which IP version(s) to use for reaching the DOSBox server.
+ *
+ * The values are what is stored in the registry (dosbox_ip_version).
+*/
+enum main_config_dosbox_ip_version
+{
+	DOSBOX_IP_VERSION_AUTO = 0,  /* IPv4 and IPv6, whichever the server is reachable by. */
+	DOSBOX_IP_VERSION_4    = 4,  /* IPv4 only, even if IPv6 would be available. */
+	DOSBOX_IP_VERSION_6    = 6,  /* IPv6 only, even if IPv4 would be available. */
+};
+
 enum main_config_frame_type
 {
 	FRAME_TYPE_ETH_II = 1,
@@ -50,7 +61,9 @@ typedef struct main_config {
 	
 	char *dosbox_server_addr;
 	uint16_t dosbox_server_port;
+	uint16_t dosbox_server_port6;  /* Port to use if the server is reached by IPv6, 0 = same as dosbox_server_port. */
 	bool dosbox_coalesce;
+	enum main_config_dosbox_ip_version dosbox_ip_version;
 	
 	enum ipx_log_level log_level;
 	bool profile;

@@ -462,8 +462,16 @@ void ipx_interfaces_init(void)
 	
 	if(ipx_encap_type == ENCAP_TYPE_DOSBOX)
 	{
-		log_printf(LOG_INFO, "Using DOSBox server: %s port %hu",
-			main_config.dosbox_server_addr, main_config.dosbox_server_port);
+		if (main_config.dosbox_server_port6 != 0) {
+			log_printf(LOG_INFO, "Using port %hu instead if the DOSBox server is reached by IPv6",
+				main_config.dosbox_server_port6);
+		}
+		
+		log_printf(LOG_INFO, "Using DOSBox server: %s port %hu (IP version: %s)",
+			main_config.dosbox_server_addr, main_config.dosbox_server_port,
+			(main_config.dosbox_ip_version == DOSBOX_IP_VERSION_4 ? "IPv4 only"
+				: main_config.dosbox_ip_version == DOSBOX_IP_VERSION_6 ? "IPv6 only"
+				: "automatic"));
 	}
 	else{
 		/* Virtual IPX interfaces... */

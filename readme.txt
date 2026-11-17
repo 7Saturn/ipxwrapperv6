@@ -35,6 +35,34 @@ or communication between Windows and DOS games (running under DOSBox).
 To enable this, select the "DOSBox UDP encapsulation" option in ipxconfig and
 enter the address/port of your DOSBox server.
 
+The DOSBox server can be reached using IPv4 or IPv6, provided the server
+supports it. The address may be a host name, an IPv4 address (192.0.2.1) or an
+IPv6 address (2001:db8::1, optionally in square brackets).
+
+ * If your computer has both IPv4 and IPv6 addresses, the "IP version" list in
+   ipxconfig lets you choose between "Automatic", "IPv4 only" and "IPv6 only".
+   
+   "Automatic" uses whichever the server can be reached by. If the server name
+   resolves to an IPv6 and an IPv4 address, they are tried in the order
+   preferred by Windows (usually IPv6 first), moving on to the next one if
+   there is no answer within a second.
+   
+   "IPv4 only" and "IPv6 only" never use the other IP version, even if that
+   means the server cannot be reached.
+
+ * If your computer only has one of the two, there is nothing to choose and the
+   list just shows which one that is.
+
+ * If the server listens on a different port for IPv6 than for IPv4, enter it
+   under "Port for IPv6, if different". Leave the field empty otherwise.
+
+Note: Depending on the implementation the other players may need to use the
+same IP version as you or not. It the server passes packets between IPv4 and
+IPv6 clients it is not necessary to ensure compatibility.
+
+All of the above only applies to the DOSBox UDP encapsulation. The other
+encapsulation types work as before (IPXWrapper UDP encapsulation uses IPv4).
+
 Using the real IPX protocol
 ---------------------------
 

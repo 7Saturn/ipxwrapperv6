@@ -21,6 +21,7 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <wsipx.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "addr.h"
@@ -32,7 +33,18 @@
 extern SOCKET shared_socket;
 extern SOCKET private_socket;
 
-extern struct sockaddr_in dosbox_server_addr;
+/* Send a packet to the DOSBox server we are connected (or connecting) to,
+ * using the UDP socket matching the IP version of its address.
+ *
+ * Returns like sendto(): the number of bytes sent, or -1 on error with the
+ * reason available from WSAGetLastError().
+*/
+int dosbox_sendto(const void *data, int data_size);
+
+/* Returns true if the DOSBox server is (or, if not yet known, will be) reached
+ * using IPv6 rather than IPv4.
+*/
+bool dosbox_server_is_ipv6(void);
 
 void router_init(void);
 void router_cleanup(void);

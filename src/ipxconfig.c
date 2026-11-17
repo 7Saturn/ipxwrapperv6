@@ -25,6 +25,7 @@
 
 #include "config.h"
 #include "interface2.h"
+#include "ipver.h"
 #include "addr.h"
 
 const char *IPXCONFIG_WINDOW_CLASS = "ipxconfig_class";
@@ -53,6 +54,8 @@ enum {
 	ID_DOSBOX_SERVER_PORT = 52,
 	ID_DOSBOX_COALESCE = 53,
 	ID_DOSBOX_FW_EXCEPT = 55,
+	ID_DOSBOX_IP_VERSION = 56,
+	ID_DOSBOX_SERVER_PORT6 = 57,
 	
 	ID_IPXWRAPPER_PORT = 61,
 	ID_IPXWRAPPER_FW_EXCEPT = 62,
@@ -121,6 +124,9 @@ static int get_text_height(HWND hwnd);
 static const char *w32_errmsg(DWORD errnum);
 static void die(const char *fmt, ...);
 static bool _pcap_installed();
+static void init_dosbox_ip_version(void);
+static void update_dosbox_port6_state(void);
+static enum main_config_dosbox_ip_version selected_dosbox_ip_version(void);
 
 static bool PCAP_INSTALLED;
 
@@ -130,6 +136,15 @@ static size_t nics_count = 0;
 
 static main_config_t main_config;
 static addr48_t primary_iface;
+
+/* The choices offered in the "IP version" list of the DOSBox options, in the
+   order they appear there. Which ones are offered depends on the IP versions
+   this computer has addresses for, see init_dosbox_ip_version(). */
+static enum main_config_dosbox_ip_version dosbox_ip_version_choices[3];
+static int dosbox_ip_version_n_choices = 0;
+
+/* True if this computer has a usable IPv6 address. */
+static bool dosbox_have_ipv6 = false;
 
 static const char *inv_error;
 static HWND inv_window = NULL;
@@ -166,6 +181,10 @@ static struct {
 	HWND dosbox_server_addr;
 	HWND dosbox_server_port_lbl;
 	HWND dosbox_server_port;
+	HWND dosbox_ip_version_lbl;
+	HWND dosbox_ip_version;
+	HWND dosbox_server_port6_lbl;
+	HWND dosbox_server_port6;
 	HWND dosbox_coalesce;
 	HWND dosbox_fw_except;
 	
@@ -227,6 +246,12 @@ static LRESULT CALLBACK main_wproc(HWND window, UINT msg, WPARAM wp, LPARAM lp) 
 		}
 		
 		case WM_COMMAND: {
+			if (HIWORD(wp) == CBN_SELCHANGE && LOWORD(wp) == ID_DOSBOX_IP_VERSION) {
+				/* Another IP version was chosen. */
+				update_dosbox_port6_state();
+				break;
+			}
+			
 			if(HIWORD(wp) == BN_CLICKED) {
 				switch(LOWORD(wp)) {
 					case ID_ENCAP_IPXWRAPPER:
@@ -636,7 +661,45 @@ static bool save_config()
 			abort();
 		}
 		
-		main_config.dosbox_server_port = port;
+		/* The IPv6 port is optional. Left empty, the port above is used
+		   for IPv6 as well (stored as zero). If the field is disabled
+		   (no IPv6 on this computer, or IPv4 forced) it is not checked
+		   and its value is kept as it is. */
+		
+		int port6 = main_config.dosbox_server_port6;
+		
+		if (IsWindowEnabled(wh.dosbox_server_port6)) {
+			GetWindowText(wh.dosbox_server_port6, port_s, 32);
+			
+			if (port_s[0] == '\0') {
+				port6 = 0;
+			}
+			else {
+				port6 = strtol(port_s, &endptr, 10);
+				
+				if (port6 < 1 || port6 > 65535 || *endptr) {
+					MessageBox(wh.main, "Invalid IPv6 port number.\n"
+					                    "Port number must be an integer in the range 1 - 65535,\n"
+					                    "or empty to use the same port as for IPv4.", "Error", MB_OK);
+					
+					SetFocus(wh.dosbox_server_port6);
+					Edit_SetSel(wh.dosbox_server_port6, 0, Edit_GetTextLength(wh.dosbox_server_port6));
+					
+					return false;
+				}
+			}
+		}
+		
+		main_config.dosbox_server_port  = port;
+		main_config.dosbox_server_port6 = port6;
+		
+		/* If the computer has only one IP version there was nothing to
+		   choose from, and "automatic" is stored. That way a setting
+		   made on another network cannot lock the user into an IP
+		   version they don't have (and aren't offered to change). */
+		
+		main_config.dosbox_ip_version = selected_dosbox_ip_version();
+		
 		main_config.dosbox_coalesce = get_checkbox(wh.dosbox_coalesce);
 		main_config.fw_except = get_checkbox(wh.dosbox_fw_except);
 	}
@@ -820,6 +883,8 @@ static void main_window_init()
 	/* +- Network options ---------------------------------------+
 	 * |   DOSBox IPX server address | foo.bar.com       |       |
 	 * |      DOSBox IPX server port | 213               |       |
+	 * |                  IP version | Automatic       |▼|       |
+	 * | Port for IPv6, if different | 2130              |       |
 	 * |                                                         |
 	 * | □ Automatically create Windows Firewall exceptions      |
 	 * +---------------------------------------------------------+
@@ -845,6 +910,12 @@ static void main_window_init()
 		wh.dosbox_server_port_lbl = create_STATIC(wh.box_dosbox_options, "DOSBox IPX server port");
 		wh.dosbox_server_port     = create_child(wh.box_dosbox_options, "EDIT", "", WS_TABSTOP, WS_EX_CLIENTEDGE, ID_DOSBOX_SERVER_PORT);
 		
+		wh.dosbox_ip_version_lbl = create_STATIC(wh.box_dosbox_options, "IP version");
+		wh.dosbox_ip_version     = create_child(wh.box_dosbox_options, WC_COMBOBOX, NULL, CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_TABSTOP, 0, ID_DOSBOX_IP_VERSION);
+		
+		wh.dosbox_server_port6_lbl = create_STATIC(wh.box_dosbox_options, "Port for IPv6, if different");
+		wh.dosbox_server_port6     = create_child(wh.box_dosbox_options, "EDIT", "", WS_TABSTOP, WS_EX_CLIENTEDGE, ID_DOSBOX_SERVER_PORT6);
+		
 		wh.dosbox_coalesce  = create_checkbox(wh.box_dosbox_options, "Coalesce packets when saturated", ID_DOSBOX_COALESCE);
 		wh.dosbox_fw_except = create_checkbox(wh.box_dosbox_options, "Automatically create Windows Firewall exceptions", ID_DOSBOX_FW_EXCEPT);
 		
@@ -856,6 +927,13 @@ static void main_window_init()
 		
 		sprintf(port_s, "%hu", main_config.dosbox_server_port);
 		SetWindowText(wh.dosbox_server_port, port_s);
+		
+		if (main_config.dosbox_server_port6 != 0) {
+			sprintf(port_s, "%hu", main_config.dosbox_server_port6);
+			SetWindowText(wh.dosbox_server_port6, port_s);
+		}
+		
+		init_dosbox_ip_version();
 		
 		set_checkbox(wh.dosbox_coalesce, main_config.dosbox_coalesce);
 		set_checkbox(wh.dosbox_fw_except, main_config.fw_except);
@@ -952,7 +1030,9 @@ static void main_window_init()
 	const int text_h = get_text_height(wh.box_primary);
 	const int edit_h = text_h + 2 * edge;
 	const int lbl_w  = get_text_width(wh.nic_net_lbl, "Network number") + 2 * edge;
-	const int lbl_w2 = get_text_width(wh.nic_net_lbl, "DOSBox IPX server address") + 2 * edge;
+	const int lbl_w2 = max(
+		get_text_width(wh.nic_net_lbl, "DOSBox IPX server address"),
+		get_text_width(wh.nic_net_lbl, "Port for IPv6, if different")) + 2 * edge;
 	
 	const int port_w = get_text_width(wh.nic_node, "000000") * 1.5;
 	const int node_w = get_text_width(wh.nic_node, "00:00:00:00:00:00") * 1.5;
@@ -1050,6 +1130,32 @@ static void main_window_init()
 		
 		MoveWindow(wh.dosbox_server_port_lbl, BOX_SIDE_PAD, box_dosbox_options_y, lbl_w2, text_h, TRUE);
 		MoveWindow(wh.dosbox_server_port, 15 + lbl_w2, box_dosbox_options_y, port_w, edit_h, TRUE);
+		box_dosbox_options_y += edit_h;
+		
+		/* Make the IP version ComboBox wide enough for its longest
+		   entry, same as for the frame type below.	*/
+		
+		int ipv_w = 0;
+		for (int count = ComboBox_GetCount(wh.dosbox_ip_version), i = 0; i < count; ++i) {
+			char ipv_label[256];
+			ComboBox_GetLBText(wh.dosbox_ip_version, i, ipv_label);
+			
+			int this_ipv_w = get_text_width(wh.dosbox_ip_version, ipv_label) * 1.5;
+			ipv_w = max(ipv_w, this_ipv_w);
+		}
+		
+		/* Room for the drop-down button, which matters when the only
+		   entry is as short as "IPv4". */
+		ipv_w += GetSystemMetrics(SM_CXVSCROLL) + 4 * edge;
+		
+		box_dosbox_options_y += 2; /* Small gap, ComboBoxes are taller than edit controls. */
+		
+		MoveWindow(wh.dosbox_ip_version_lbl, BOX_SIDE_PAD, box_dosbox_options_y, lbl_w2, text_h, TRUE);
+		MoveWindow(wh.dosbox_ip_version, 15 + lbl_w2, box_dosbox_options_y, ipv_w, edit_h * 10, TRUE);
+		box_dosbox_options_y += edit_h + 4;
+		
+		MoveWindow(wh.dosbox_server_port6_lbl, BOX_SIDE_PAD, box_dosbox_options_y, lbl_w2, text_h, TRUE);
+		MoveWindow(wh.dosbox_server_port6, 15 + lbl_w2, box_dosbox_options_y, port_w, edit_h, TRUE);
 		box_dosbox_options_y += edit_h;
 		
 		box_dosbox_options_y += text_h; /* Padding. */
@@ -1397,6 +1503,87 @@ static void die(const char *fmt, ...) {
 
 	MessageBox(NULL, msg, "Fatal error", MB_OK | MB_TASKMODAL | MB_ICONERROR);
 	exit(1);
+}
+
+/* Fill the "IP version" list of the DOSBox options.
+ *
+ * What is offered depends on the IP versions this computer currently has
+ * usable addresses for:
+ *
+ *   IPv4 and IPv6 - Three choices: use whichever works (the default), force
+ *                   IPv4 or force IPv6.
+ *
+ *   Only one      - There is no alternative to offer. The list shows the one
+ *                   IP version for information and is disabled.
+ *
+ *   Neither       - Not connected to any network at the moment. The list
+ *                   shows "Automatic" and is disabled.
+*/
+static void init_dosbox_ip_version(void)
+{
+	unsigned int available = ipver_detect_available();
+	
+	ComboBox_ResetContent(wh.dosbox_ip_version);
+	dosbox_ip_version_n_choices = 0;
+	
+	if ((available & IPVER_HAVE_V4) && (available & IPVER_HAVE_V6)) {
+		ComboBox_AddString(wh.dosbox_ip_version, "Automatic (IPv4 or IPv6)");
+		dosbox_ip_version_choices[dosbox_ip_version_n_choices++] = DOSBOX_IP_VERSION_AUTO;
+		
+		ComboBox_AddString(wh.dosbox_ip_version, "IPv4 only");
+		dosbox_ip_version_choices[dosbox_ip_version_n_choices++] = DOSBOX_IP_VERSION_4;
+		
+		ComboBox_AddString(wh.dosbox_ip_version, "IPv6 only");
+		dosbox_ip_version_choices[dosbox_ip_version_n_choices++] = DOSBOX_IP_VERSION_6;
+	}
+	else {
+		const char *label = (available & IPVER_HAVE_V4) ? "IPv4"
+			: (available & IPVER_HAVE_V6) ? "IPv6"
+			: "Automatic";
+		
+		ComboBox_AddString(wh.dosbox_ip_version, label);
+		dosbox_ip_version_choices[dosbox_ip_version_n_choices++] = DOSBOX_IP_VERSION_AUTO;
+	}
+	
+	/* Select the configured value if it is on offer, else the first entry
+	   (which is always the "automatic" one). */
+	
+	int selected = 0;
+	
+	for (int i = 0; i < dosbox_ip_version_n_choices; ++i) {
+		if (dosbox_ip_version_choices[i] == main_config.dosbox_ip_version) {
+			selected = i;
+		}
+	}
+	
+	ComboBox_SetCurSel(wh.dosbox_ip_version, selected);
+	
+	EnableWindow(wh.dosbox_ip_version, (dosbox_ip_version_n_choices > 1));
+	
+	/* A separate port for IPv6 makes no sense without IPv6. */
+	dosbox_have_ipv6 = (available & IPVER_HAVE_V6) != 0;
+	
+	update_dosbox_port6_state();
+}
+
+/* Returns the IP version currently chosen in the "IP version" list. */
+static enum main_config_dosbox_ip_version selected_dosbox_ip_version(void)
+{
+	int index = ComboBox_GetCurSel(wh.dosbox_ip_version);
+	
+	return (index >= 0 && index < dosbox_ip_version_n_choices)
+		? dosbox_ip_version_choices[index]
+		: DOSBOX_IP_VERSION_AUTO;
+}
+
+/* Enable the "Port for IPv6" field only if IPv6 might actually be used: the
+   computer has IPv6 and the user didn't force IPv4. */
+static void update_dosbox_port6_state(void)
+{
+	bool enable = dosbox_have_ipv6 && selected_dosbox_ip_version() != DOSBOX_IP_VERSION_4;
+	
+	EnableWindow(wh.dosbox_server_port6_lbl, enable);
+	EnableWindow(wh.dosbox_server_port6, enable);
 }
 
 /* Check if WinPcap is installed.

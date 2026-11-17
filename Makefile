@@ -44,7 +44,7 @@ BIN_FILES := $(shell cat manifest.bin.txt)
 SRC_FILES := $(shell cat manifest.src.txt)
 
 # Tests to compile before running the test suite.
-TESTS := tests/addr.exe tests/addrcache.exe tests/ethernet.exe tests/ratelimit.exe tests/spx.exe tools/fionread.exe
+TESTS := tests/addr.exe tests/addrcache.exe tests/ethernet.exe tests/ipver.exe tests/ratelimit.exe tests/spx.exe tools/fionread.exe
 
 # Tools to compile before running the test suite.
 TOOLS := tools/socket.exe tools/list-interfaces.exe tools/bind.exe tools/ipx-send.exe \
@@ -84,7 +84,7 @@ dist: all
 
 IPXWRAPPER_OBJS := src/ipxwrapper.o src/winsock.o src/ipxwrapper_stubs.o src/log.o src/common.o \
 	src/interface.o src/interface2.o src/router.o src/ipxwrapper.def src/addrcache.o src/config.o src/addr.o \
-	src/firewall.o src/ethernet.o src/funcprof.o src/coalesce.o src/spx.o src/mclock.o inih/ini.o
+	src/firewall.o src/ethernet.o src/funcprof.o src/coalesce.o src/spx.o src/mclock.o src/ipver.o inih/ini.o
 
 ipxwrapper.dll: $(IPXWRAPPER_OBJS)
 	echo 'const char *version_string = "$(VERSION)", *compile_time = "'`date`'";' | $(CC) -c -x c -o version.o -
@@ -128,7 +128,7 @@ src/dpwsockx_stubs.s: mkstubs.pl src/dpwsockx_stubs.txt
 #
 
 IPXCONFIG_OBJS := src/ipxconfig.o icons/ipxconfig.o src/addr.o src/interface2.o src/common.o \
-	src/config.o src/ipxconfig_stubs.o src/funcprof.o inih/ini.o
+	src/config.o src/ipxconfig_stubs.o src/funcprof.o src/ipver.o inih/ini.o
 
 ipxconfig.exe: $(IPXCONFIG_OBJS)
 	$(CC) $(CCFLAGS) -Wl,--enable-stdcall-fixup -static-libgcc -mwindows -o $@ $^ -liphlpapi -lcomctl32 -lws2_32
@@ -174,6 +174,7 @@ test-prep: $(TESTS) $(TOOLS) $(TOOL_DLLS)
 tests/addr.exe: tests/addr.o tests/tap/basic.o src/addr.o
 tests/addrcache.exe: tests/addrcache.o tests/tap/basic.o src/addrcache.o src/addr.o
 tests/ethernet.exe: tests/ethernet.o tests/tap/basic.o src/ethernet.o src/addr.o
+tests/ipver.exe: tests/ipver.o tests/tap/basic.o src/ipver.o
 tests/ratelimit.exe: tests/ratelimit.o src/addr.o src/common.o tests/tap/basic.o
 tests/spx.exe: tests/spx.o src/addr.o src/mclock.o tests/tap/basic.o
 

@@ -4,7 +4,9 @@ IPXWrapper development hints
 Compiling
 ---------
 
-IPXWrapper can be compiled using the toolchains from win-builds.org, both under Windows and cross-compiling from Linux. If cross-compiling, set the HOST environment variable to i686-w64-mingw32 or similar, depending on your system.
+See BUILDING.md for step by step instructions for setting up a build environment and compiling under Linux and Windows.
+
+In short: IPXWrapper can be compiled using a MinGW-w64 toolchain targeting 32-bit Windows, both under Windows and cross-compiling from Linux. If cross-compiling, set the HOST environment variable to i686-w64-mingw32 or similar, depending on your system.
 
 In addition to a GCC toolchain, you will need the following:
 

@@ -1,4 +1,8 @@
 Version UNRELEASED:
+	Added IPv6 support for DOSBox encapsulation: the DOSBox IPX server can
+	be reached by IPv4 or IPv6, with a new option to force one of the two
+	and an optional separate server port for IPv6.
+	
 	Fix delivery of locally-generated packets to the same process when using
 	IPXWrapper UDP or DOSBox encapsulation.
 	

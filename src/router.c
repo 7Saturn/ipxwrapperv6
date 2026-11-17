@@ -30,6 +30,7 @@
 #include "funcprof.h"
 #include "ipxwrapper.h"
 #include "interface.h"
+#include "ipver.h"
 #include "addrcache.h"
 #include "ethernet.h"
 #include "spx.h"
@@ -58,13 +59,36 @@ static HANDLE router_thread  = NULL;
  * When running in DOSBox mode, only the private socket will be opened and
  * bound to a random port on INADDR_ANY to communicate with the DOSBox server
  * and also relay packets to local sockets.
+ *
+ * If the DOSBox server is to be reached by IPv6, a second socket is opened
+ * for that (dosbox_socket6), bound to a random port on the IPv6 "any" address.
+ * The private socket cannot be used, as an IPv4 socket cannot send to IPv6
+ * destinations. It is still needed for relaying packets to local sockets,
+ * which is always done via the IPv4 loopback address.
 */
 
 SOCKET shared_socket  = -1;
 SOCKET private_socket = -1;
 uint16_t private_port = 0; /**< Local port of private UDP socket (network byte order) */
 
-struct sockaddr_in dosbox_server_addr;
+/* IPv6 socket for talking to the DOSBox server, see above. Only created when
+   (and if) the address of an IPv6 server has been resolved. */
+static SOCKET dosbox_socket6 = -1;
+
+/* Address of the DOSBox server we are currently registering with or connected
+   to. May hold an IPv4 (sockaddr_in) or IPv6 (sockaddr_in6) address. */
+static SOCKADDR_STORAGE dosbox_server_addr;
+static int dosbox_server_addrlen = 0;
+
+/* A server name can resolve to several addresses, typically one IPv6 and one
+   IPv4 address. These are the "candidates". They are tried one after the
+   other, in the order of preference given by the operating system, until the
+   server answers a registration request on one of them. */
+static SOCKADDR_STORAGE dosbox_candidate_addrs[IPVER_MAX_ADDRS];
+static int dosbox_candidate_addrlens[IPVER_MAX_ADDRS];
+static int dosbox_n_candidates = 0;
+static int dosbox_candidate_idx = 0;
+
 static HANDLE dosbox_ready_event = NULL;
 
 static uint64_t dosbox_next_connection_attempt_at;
@@ -79,7 +103,24 @@ static const unsigned int MAX_DOSBOX_REGISTRATION_RETRY_INTERVAL_MS = 8000;
 
 static const unsigned int DOSBOX_REGISTRATION_TIMEOUT_MS = 30000;
 
+/* When there is more than one candidate address, switch to the next one if
+   the current one did not answer within this time. With the retry intervals
+   above, each candidate is sent 3 registration requests before moving on.
+  
+   This must be well below IPX_READY_TIMEOUT (the time socket functions wait
+   for the connection at program start), so that there is enough of it left
+   to succeed with the second address if the first one is dead - typically an
+   IPv6 address on a network whose IPv6 doesn't actually work.
+  
+   All candidates are tried in turn until DOSBOX_REGISTRATION_TIMEOUT_MS has
+   passed overall, so a server which is slow to answer still gets its chance. */
+static const unsigned int DOSBOX_CANDIDATE_TIMEOUT_MS = 1000;
+
+static uint64_t dosbox_candidate_timeout_at;
+
 static void _send_dosbox_registration_request(void);
+static bool _resolve_dosbox_server(void);
+static void _select_dosbox_candidate(int idx, uint64_t now);
 static DWORD router_main(void *arg);
 
 /* Initialise a UDP socket. */
@@ -122,6 +163,90 @@ static void _init_socket(SOCKET *sock, uint16_t port, BOOL broadcast, BOOL reuse
 		log_printf(LOG_ERROR, "WSAEventSelect error: %s", w32_error(WSAGetLastError()));
 		abort();
 	}
+}
+
+/* Create the IPv6 UDP socket used to communicate with a DOSBox server, unless
+   it exists already.
+  
+   Unlike _init_socket() this does not abort on failure: IPv6 may simply not
+   be installed on this computer, in which case we carry on using IPv4.
+  
+   Returns true if the socket is ready for use. */
+static bool _init_dosbox_socket6(void)
+{
+	if (dosbox_socket6 != -1) {
+		return true;
+	}
+	
+	SOCKET sock = r_socket(AF_INET6, SOCK_DGRAM, 0);
+	if (sock == -1) {
+		log_printf(LOG_WARNING, "Cannot create IPv6 UDP socket: %s", w32_error(WSAGetLastError()));
+		return false;
+	}
+	
+	/* The socket shall handle IPv6 only. IPv4 has its own socket. This is
+	   the default on Windows anyway, and the only possible behaviour on
+	   versions before Vista (where the option doesn't exist and setting
+	   it fails, which is why any error is ignored here). */
+	
+	DWORD v6only = 1;
+	r_setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, (char*)(&v6only), sizeof(v6only));
+	
+	/* Set send/receive buffer size to 512KiB, like _init_socket(). */
+	
+	int bufsize = 524288;
+	
+	r_setsockopt(sock, SOL_SOCKET, SO_RCVBUF, (char*)(&bufsize), sizeof(int));
+	r_setsockopt(sock, SOL_SOCKET, SO_SNDBUF, (char*)(&bufsize), sizeof(int));
+	
+	/* Bind to a random port on the "any" address (all zeroes). */
+	
+	struct sockaddr_in6 addr;
+	memset(&addr, 0, sizeof(addr));
+	
+	addr.sin6_family = AF_INET6;
+	addr.sin6_port   = htons(0);
+	
+	if (r_bind(sock, (struct sockaddr*)(&addr), sizeof(addr)) == -1) {
+		log_printf(LOG_WARNING, "Cannot bind IPv6 UDP socket: %s", w32_error(WSAGetLastError()));
+		
+		r_closesocket(sock);
+		return false;
+	}
+	
+	/* Have the router thread woken when a packet arrives. This also makes
+	   the socket non-blocking. */
+	
+	if (WSAEventSelect(sock, router_event, FD_READ) == -1) {
+		log_printf(LOG_WARNING, "WSAEventSelect error on IPv6 UDP socket: %s", w32_error(WSAGetLastError()));
+		
+		r_closesocket(sock);
+		return false;
+	}
+	
+	dosbox_socket6 = sock;
+	
+	return true;
+}
+
+int dosbox_sendto(const void *data, int data_size)
+{
+	SOCKET sock = dosbox_server_addr.ss_family == AF_INET6
+		? dosbox_socket6
+		: private_socket;
+	
+	return r_sendto(sock, (const char*)(data), data_size, 0, (struct sockaddr*)(&dosbox_server_addr), dosbox_server_addrlen);
+}
+
+bool dosbox_server_is_ipv6(void)
+{
+	if (dosbox_state == DOSBOX_DISCONNECTED) {
+		/* Server address not resolved yet. We only know for sure which
+		   IP version it is going to be if the user forced one. */
+		return main_config.dosbox_ip_version == DOSBOX_IP_VERSION_6;
+	}
+	
+	return dosbox_server_addr.ss_family == AF_INET6;
 }
 
 /* Initialise the UDP socket and router worker thread.
@@ -228,6 +353,11 @@ void router_cleanup(void)
 	{
 		closesocket(shared_socket);
 		shared_socket = -1;
+	}
+	
+	if (dosbox_socket6 != -1) {
+		r_closesocket(dosbox_socket6);
+		dosbox_socket6 = -1;
 	}
 	
 	if(router_event != WSA_INVALID_EVENT)
@@ -522,7 +652,13 @@ static void _handle_dosbox_registration_response(novell_ipx_packet *packet, size
 	char local_nodenum_s[ADDR48_STRING_SIZE];
 	addr48_string(local_nodenum_s, dosbox_local_nodenum);
 	
-	log_printf(LOG_INFO, "Connected to DOSBox server, local address: %s/%s", local_netnum_s, local_nodenum_s);
+	char server_addr_s[IPVER_ADDR_STRING_SIZE];
+	ipver_sockaddr_string(server_addr_s, (struct sockaddr*)(&dosbox_server_addr));
+	
+	log_printf(LOG_INFO, "Connected to DOSBox server %s (%s), local address: %s/%s",
+		server_addr_s,
+		(dosbox_server_addr.ss_family == AF_INET6 ? "IPv6" : "IPv4"),
+		local_netnum_s, local_nodenum_s);
 	
 	SetEvent(dosbox_ready_event);
 }
@@ -544,8 +680,7 @@ static void _send_dosbox_ping_ack(addr48_t reply_to)
 	addr48_out(ack_pkt.src_node, dosbox_local_nodenum);
 	ack_pkt.src_socket = htons(IPX_SOCK_ECHO);
 	
-	if(sendto(private_socket, (const void*)(&ack_pkt), sizeof(ack_pkt), 0, (struct sockaddr*)(&dosbox_server_addr), sizeof(dosbox_server_addr)) < 0)
-	{
+	if (dosbox_sendto(&ack_pkt, sizeof(ack_pkt)) < 0) {
 		log_printf(LOG_ERROR, "Error sending DOSBox ping ack: %s", w32_error(WSAGetLastError()));
 	}
 }
@@ -652,7 +787,8 @@ static void _handle_dosbox_recv(novell_ipx_packet *packet, size_t packet_size)
 
 static int _do_udp_recv(int fd)
 {
-	struct sockaddr_in addr;
+	/* Big enough for the source address of any IP version. */
+	SOCKADDR_STORAGE addr;
 	int addrlen = sizeof(addr);
 	
 	char buf[MAX_PKT_SIZE];
@@ -674,10 +810,7 @@ static int _do_udp_recv(int fd)
 	
 	if(ipx_encap_type == ENCAP_TYPE_DOSBOX)
 	{
-		if(addr.sin_family != dosbox_server_addr.sin_family
-			|| memcmp(&(addr.sin_addr), &(dosbox_server_addr.sin_addr), sizeof(struct in_addr)) != 0
-			|| addr.sin_port != dosbox_server_addr.sin_port)
-		{
+		if (!ipver_sockaddr_equal((struct sockaddr*)(&addr), (struct sockaddr*)(&dosbox_server_addr))) {
 			/* Ignore packet from wrong address. */
 			return 1;
 		}
@@ -696,9 +829,12 @@ static int _do_udp_recv(int fd)
 		}
 	}
 	else{
-		if(addr.sin_port != private_port || !ipv4_address_is_local(addr.sin_addr.s_addr))
-		{
-			_handle_udp_recv((ipx_packet*)(buf), len, addr);
+		/* The sockets used for IPXWrapper's own UDP encapsulation are
+		   IPv4 sockets, so this can only be an IPv4 address. */
+		struct sockaddr_in *addr4 = (struct sockaddr_in*)(&addr);
+		
+		if (addr4->sin_port != private_port || !ipv4_address_is_local(addr4->sin_addr.s_addr)) {
+			_handle_udp_recv((ipx_packet*)(buf), len, *addr4);
 		}
 	}
 	
@@ -796,10 +932,111 @@ static void _send_dosbox_registration_request(void)
 	memset(reg_pkt.src_node, 0, sizeof(reg_pkt.src_node));
 	reg_pkt.src_socket = htons(IPX_SOCK_ECHO);
 	
-	if(sendto(private_socket, (const void*)(&reg_pkt), sizeof(reg_pkt), 0, (struct sockaddr*)(&dosbox_server_addr), sizeof(dosbox_server_addr)) < 0)
-	{
+	if (dosbox_sendto(&reg_pkt, sizeof(reg_pkt)) < 0) {
 		log_printf(LOG_ERROR, "Error sending DOSBox IPX registration request: %s", w32_error(WSAGetLastError()));
+		
+		/* If the system cannot even send to this address (e.g. "network
+		   unreachable" for an IPv6 address without any IPv6 route),
+		   there is no point in waiting for an answer for the full
+		   DOSBOX_CANDIDATE_TIMEOUT_MS. Move on to the next candidate
+		   address soon - but not instantly, so we don't spin through
+		   the candidates at full speed if none of them can be sent to. */
+		
+		uint64_t give_up_at = get_ticks() + INITIAL_DOSBOX_REGISTRATION_RETRY_INTERVAL_MS;
+		
+		if (give_up_at < dosbox_candidate_timeout_at) {
+			dosbox_candidate_timeout_at = give_up_at;
+		}
 	}
+}
+
+/* Resolve the configured DOSBox server address into the list of candidate
+   addresses (dosbox_candidate_addrs), honouring the IP version chosen by the
+   user.
+  
+   Returns true if there is at least one candidate. Otherwise the reason has
+   been logged. */
+static bool _resolve_dosbox_server(void)
+{
+	int family = AF_UNSPEC;
+	const char *family_desc = "";
+	
+	if (main_config.dosbox_ip_version == DOSBOX_IP_VERSION_4) {
+		family      = AF_INET;
+		family_desc = " (restricted to IPv4)";
+	}
+	else if (main_config.dosbox_ip_version == DOSBOX_IP_VERSION_6) {
+		family      = AF_INET6;
+		family_desc = " (restricted to IPv6)";
+	}
+	
+	SOCKADDR_STORAGE addrs[IPVER_MAX_ADDRS];
+	int addrlens[IPVER_MAX_ADDRS];
+	
+	int n_addrs = ipver_resolve(main_config.dosbox_server_addr, main_config.dosbox_server_port, family, addrs, addrlens, IPVER_MAX_ADDRS);
+	if (n_addrs == 0) {
+		DWORD error = WSAGetLastError();
+		log_printf(LOG_ERROR, "Error resolving %s%s: %s (%u)",
+			main_config.dosbox_server_addr, family_desc, w32_error(error), (unsigned int)(error));
+		
+		return false;
+	}
+	
+	/* Keep the addresses we are able to send to. */
+	
+	dosbox_n_candidates = 0;
+	
+	for (int i = 0; i < n_addrs; ++i) {
+		if (addrs[i].ss_family == AF_INET6) {
+			if (!_init_dosbox_socket6()) {
+				/* No IPv6 on this computer (reason already logged). */
+				continue;
+			}
+			
+			if (main_config.dosbox_server_port6 != 0) {
+                // The server listens on a different port for IPv6 than for IPv4.
+				((struct sockaddr_in6*)(&(addrs[i])))->sin6_port = htons(main_config.dosbox_server_port6);
+			}
+		}
+		
+		dosbox_candidate_addrs[dosbox_n_candidates]    = addrs[i];
+		dosbox_candidate_addrlens[dosbox_n_candidates] = addrlens[i];
+		
+		++dosbox_n_candidates;
+	}
+	
+	if (dosbox_n_candidates == 0) {
+		log_printf(LOG_ERROR, "DOSBox server %s%s has IPv6 addresses only, but IPv6 cannot be used on this computer",
+			main_config.dosbox_server_addr, family_desc);
+		
+		return false;
+	}
+	
+	return true;
+}
+
+/* Make one of the candidate addresses the current DOSBox server address and
+   restart the registration with it. */
+static void _select_dosbox_candidate(int idx, uint64_t now)
+{
+	dosbox_candidate_idx = idx;
+	
+	dosbox_server_addr    = dosbox_candidate_addrs[idx];
+	dosbox_server_addrlen = dosbox_candidate_addrlens[idx];
+	
+	char addr_s[IPVER_ADDR_STRING_SIZE];
+	ipver_sockaddr_string(addr_s, (struct sockaddr*)(&dosbox_server_addr));
+	
+	/* The port is at the same place in sockaddr_in and sockaddr_in6. */
+	unsigned int port = ntohs(((struct sockaddr_in*)(&dosbox_server_addr))->sin_port);
+	
+	log_printf(LOG_INFO, "Resolved DOSBox server address %s port %u (address %d of %d), connecting...",
+		addr_s, port, (idx + 1), dosbox_n_candidates);
+	
+	dosbox_next_registration_request_at   = 0;
+	dosbox_registration_retry_interval_ms = INITIAL_DOSBOX_REGISTRATION_RETRY_INTERVAL_MS;
+	
+	dosbox_candidate_timeout_at = now + DOSBOX_CANDIDATE_TIMEOUT_MS;
 }
 
 static DWORD router_main(void *arg)
@@ -876,6 +1113,18 @@ static DWORD router_main(void *arg)
 					wait_ms = dosbox_next_registration_request_at - now;
 					wait_ms = min(wait_ms, 1000);
 				}
+				
+				if (dosbox_n_candidates > 1) {
+					/* Also wake up in time to switch to the
+					 * next candidate address.
+					*/
+					
+					DWORD switch_in_ms = now >= dosbox_candidate_timeout_at
+						? 0
+						: dosbox_candidate_timeout_at - now;
+					
+					wait_ms = min(wait_ms, switch_in_ms);
+				}
 			}
 		}
 		
@@ -915,6 +1164,18 @@ static DWORD router_main(void *arg)
 			for(int i = 0; i < MAX_RECV_PER_LOOP; ++i)
 			{
 				status = _do_udp_recv(private_socket);
+				
+				if (status >= 0 && dosbox_socket6 != -1) {
+					/* Same logic as for the shared/private sockets below:
+					   stop on an error, or when both sockets have run dry. */
+					
+					int status6 = _do_udp_recv(dosbox_socket6);
+					
+					if (status6 != 0) {
+						status = status6;
+					}
+				}
+				
 				if(status <= 0)
 				{
 					break;
@@ -957,30 +1218,18 @@ static DWORD router_main(void *arg)
 		{
 			if(get_ticks() >= dosbox_next_connection_attempt_at)
 			{
-				struct hostent *host = gethostbyname(main_config.dosbox_server_addr);
+				bool resolved = _resolve_dosbox_server();
 				
 				uint64_t now = get_ticks();
 				
-				if(host != NULL)
-				{
-					dosbox_server_addr.sin_family = AF_INET;
-					memcpy(&(dosbox_server_addr.sin_addr), host->h_addr, 4);
-					dosbox_server_addr.sin_port = htons(main_config.dosbox_server_port);
-					
-					log_printf(LOG_INFO, "Resolved DOSBox server address %s, connecting...\n", inet_ntoa(dosbox_server_addr.sin_addr));
-					
-					dosbox_next_registration_request_at = 0;
-					dosbox_registration_retry_interval_ms = INITIAL_DOSBOX_REGISTRATION_RETRY_INTERVAL_MS;
+				if (resolved) {
+					_select_dosbox_candidate(0, now);
 					
 					dosbox_registration_timeout_at = now + DOSBOX_REGISTRATION_TIMEOUT_MS;
 					
 					dosbox_state = DOSBOX_REGISTERING;
 				}
-				else{
-					DWORD error = WSAGetLastError();
-					log_printf(LOG_ERROR, "Error resolving %s: %s (%u)",
-						main_config.dosbox_server_addr, w32_error(error), (unsigned int)(error));
-					
+				else {
 					dosbox_next_connection_attempt_at = now + dosbox_connect_retry_interval_ms;
 				}
 			}
@@ -992,9 +1241,17 @@ static DWORD router_main(void *arg)
 			
 			if(now >= dosbox_registration_timeout_at)
 			{
-				log_printf(LOG_ERROR, "Connection to DOSBox server %s timed out", inet_ntoa(dosbox_server_addr.sin_addr));
+				log_printf(LOG_ERROR, "Connection to DOSBox server %s timed out", main_config.dosbox_server_addr);
 				dosbox_state = DOSBOX_DISCONNECTED;
 			}
+			else if (dosbox_n_candidates > 1 && now >= dosbox_candidate_timeout_at) {
+				/* No answer from this address of the server (e.g.
+				   IPv6 address, but no working IPv6 route). Try
+				   the next one, starting over after the last. */
+				
+				_select_dosbox_candidate((dosbox_candidate_idx + 1) % dosbox_n_candidates, now);
+			}
+			
 			if(now >= dosbox_next_registration_request_at)
 			{
 				_send_dosbox_registration_request();

@@ -74,6 +74,17 @@ static int _max_ipx_payload(void)
 		 * #define IPXBUFFERSIZE 1424
 		*/
 		
+		if (dosbox_server_is_ipv6()) {
+			/* An IPv6 header is 20 bytes bigger than an IPv4 one:
+			  
+			     1500 (Ethernet MTU) - 40 (IPv6) - 8 (UDP) - 30 (IPX)
+			  
+			   Anything bigger would have to be fragmented, and
+			   IPv6 fragments are dropped by many firewalls. */
+			
+			return 1422;
+		}
+		
 		return 1424;
 	}
 	else{
