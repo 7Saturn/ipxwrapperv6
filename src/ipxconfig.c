@@ -831,7 +831,16 @@ static void main_window_init()
 		wh.box_dosbox_options = create_GroupBox(wh.main, "Network options");
 		
 		wh.dosbox_server_addr_lbl = create_STATIC(wh.box_dosbox_options, "DOSBox IPX server address");
-		wh.dosbox_server_addr     = create_child(wh.box_dosbox_options, "EDIT", "", WS_TABSTOP, WS_EX_CLIENTEDGE, ID_DOSBOX_SERVER_ADDR);
+        /* Without the ES_AUTOHSCROLL the text enterable (e.g. domain name) is
+           fairly limited. IPv6 addresses won't fit in there... */
+		wh.dosbox_server_addr     = create_child(wh.box_dosbox_options,
+                                                 "EDIT",
+                                                 "",
+                                                 ES_AUTOHSCROLL | WS_TABSTOP,
+                                                 WS_EX_CLIENTEDGE,
+                                                 ID_DOSBOX_SERVER_ADDR);
+        // No host name will be longer than 253 characters and IPs not even that.
+        SendMessage(wh.dosbox_server_addr, EM_SETLIMITTEXT, (WPARAM)253, 0);
 		
 		wh.dosbox_server_port_lbl = create_STATIC(wh.box_dosbox_options, "DOSBox IPX server port");
 		wh.dosbox_server_port     = create_child(wh.box_dosbox_options, "EDIT", "", WS_TABSTOP, WS_EX_CLIENTEDGE, ID_DOSBOX_SERVER_PORT);
